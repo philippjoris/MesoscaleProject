@@ -195,6 +195,8 @@ if args.plot:
     import GooseMPL as gplt
     import matplotlib.pyplot as plt
     from matplotlib.cm import ScalarMappable
+    print(plt.style.available)
+    
 
     plt.style.use(["goose", "goose-latex"])
 

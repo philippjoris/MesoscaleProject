@@ -6,7 +6,6 @@ import GMatElastoPlasticFiniteStrainSimo.Cartesian3d as GMat
 import GooseFEM
 import numpy as np
 import random
-from scipy.sparse.linalg import cg
 # mesh
 # ----
 
