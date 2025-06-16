@@ -27,16 +27,19 @@ dofs = mesh.dofs
 # create control nodes
 control = GooseFEM.Tyings.Control(coor, dofs)
 
+print(control.controlDofs)
+print(dofs[np.array([mesh.nodesBackBottomLeftCorner]), 0])
 # add control nodes
 coor = control.coor
 
 # list of prescribed DOFs (fixed node + control nodes)
 iip = np.concatenate((
-    dofs[np.array([mesh.nodesBackBottomLeftCorner]), 0],
-    dofs[np.array([mesh.nodesBackBottomLeftCorner]), 1],
-    dofs[np.array([mesh.nodesBackBottomLeftCorner]), 2],    
+    dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 0],
+    dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 1],
+    dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 2],    
     control.controlDofs[0],
-    control.controlDofs[1]
+    control.controlDofs[1],
+    control.controlDofs[2]
 ))
 
 # initialize my periodic boundary condition class
@@ -109,8 +112,9 @@ total_increment = np.zeros_like(disp)
 # deformation gradient
 F = np.array(
         [
-            [1.0 + (0.2/ninc), 0.0],
-            [0.0, 1.0 / (1.0 + (0.2/ninc))]
+            [1.0 + (0.2/ninc), 0.0, 0.0],
+            [0.0, 1.0 / (1.0 + (0.2/ninc)), 0.0],
+            [0.0, 0.0, 1.0]
         ]
     )
 
@@ -166,8 +170,9 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
 
         # initialise displacement update
         if iter == 0:
-            du[control.controlNodes, 0] = (F[0,:] - np.eye(2)[0, :]) 
-            du[control.controlNodes, 1] = (F[1,:] - np.eye(2)[1, :])  
+            du[control.controlNodes, 0] = (F[0,:] - np.eye(3)[0, :]) 
+            du[control.controlNodes, 1] = (F[1,:] - np.eye(3)[1, :])  
+            du[control.controlNodes, 2] = (F[2,:] - np.eye(3)[2, :])              
 
         # solve
         Solver.solve(K, fres, du)
@@ -190,7 +195,6 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
 
 
 # post-process
-# ------------
 # plot
 # ----
 parser = argparse.ArgumentParser()
@@ -199,33 +203,72 @@ parser.add_argument("--save", action="store_true", help="Save plot (plot not sho
 args = parser.parse_args(sys.argv[1:])
 
 if args.plot:
-    import GooseMPL as gplt
     import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    import matplotlib.cm as cm
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
+    from matplotlib.ticker import FormatStrFormatter
 
-    # plt.style.use(["goose", "goose-latex"])
+    plt.style.use(["goose", "goose-latex"])
 
     # Average equivalent stress per element
     dV = elem.AsTensor(2, elem.dV)
     Sigav = np.average(mat.Sig, weights=dV, axis=1)
     sigeq_av = GMat.Sigeq(Sigav)
-    # Average eq. strain per element
     epseq_av = GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1))
 
-    # plot stress
-    fig, ax = plt.subplots(figsize=(8, 6))
-    gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq_av, cmap="jet", axis=ax)
-    gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
-    ax.set_xlim(-1,13)
-    # ax.set_ylim(0,110)
-    
-    # Add colorbar
-    mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
-    mappable.set_array(sigeq_av)
-    fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, label="Equivalent mises stress")
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
 
-    # optional save
+    # Normalize color values for colormap
+    cmap = plt.colormaps["jet"]
+    norm = plt.Normalize(vmin=sigeq_av.min(), vmax=sigeq_av.max())
+    colors = cmap(norm(sigeq_av))
+
+    faces = [
+    [0, 1, 2, 3],  # bottom face
+    [4, 5, 6, 7],  # top face
+    [0, 1, 5, 4],  # front face
+    [1, 2, 6, 5],  # right face
+    [2, 3, 7, 6],  # back face
+    [3, 0, 4, 7]   # left face
+    ]
+
+    # Plot deformed mesh with colors
+    for i, element in enumerate(conn):
+        verts = np.array(coor[element] + disp[element]) 
+        for face in faces:
+            face_verts = verts[face].tolist()
+            poly = Poly3DCollection([face_verts], facecolors=[colors[i]], edgecolor='k', linewidths=0.5)
+            ax.add_collection3d(poly)
+
+    # Plot undeformed mesh with dashed edges and transparent faces
+    for element in conn:
+        verts = np.array(coor[element]) 
+        for face in faces:
+            face_verts = verts[face].tolist()
+            poly = Poly3DCollection([face_verts],
+                                    facecolors=[[0, 0, 0, 0]],  # Fully transparent
+                                    edgecolors='k',
+                                    linewidths=0.5,
+                                    linestyles='dashed')
+            ax.add_collection3d(poly)
+
+    # Add colorbar
+    mappable = ScalarMappable(norm=norm, cmap=cmap)
+    mappable.set_array(sigeq_av)
+    cbar = fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, label="Equivalent stress")
+    cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.1f'))
+
+    # Labels and view
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_box_aspect([1, 1, 1])  # Equal aspect ratio
+    ax.auto_scale_xyz(coor[:, 0], coor[:, 1], coor[:, 2])  # Ensure scaling works properly
+
+    # Optional save or show
     if args.save:
         fig.savefig('fixed-disp_contour_sig.pdf')
     else:
@@ -233,34 +276,60 @@ if args.plot:
 
     plt.close(fig)
 
-    # plot strain
-    fig, ax = plt.subplots(figsize=(8, 6))
-    gplt.patch(coor=coor + disp, conn=conn, cindex=epseq_av, cmap="jet", axis=ax)
-    gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
-    ax.set_xlim(-1,13)
-    # ax.set_ylim(0,110)
-    
-    # Add colorbar
-    mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
-    mappable.set_array(epseq_av)
-    fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, label="Equivalent strain")
+    fig = plt.figure()
+    ax = fig.add_subplot(111, projection='3d')
 
-    # optional save
+    # Normalize color values for colormap
+    cmap = plt.colormaps["jet"]
+    norm = plt.Normalize(vmin=epseq_av.min(), vmax=epseq_av.max())
+    colors = cmap(norm(epseq_av))
+    
+    faces = [
+    [0, 1, 2, 3],  # bottom face
+    [4, 5, 6, 7],  # top face
+    [0, 1, 5, 4],  # front face
+    [1, 2, 6, 5],  # right face
+    [2, 3, 7, 6],  # back face
+    [3, 0, 4, 7]   # left face
+    ]
+
+    # Plot deformed mesh with colors
+    for i, element in enumerate(conn):
+        verts = np.array(coor[element] + disp[element]) 
+        for face in faces:
+            face_verts = verts[face].tolist()
+            poly = Poly3DCollection([face_verts], facecolors=[colors[i]], edgecolor='k', linewidths=0.5)
+            ax.add_collection3d(poly)
+
+    # Plot undeformed mesh with dashed edges and transparent faces
+    for element in conn:
+        verts = np.array(coor[element]) 
+        for face in faces:
+            face_verts = verts[face].tolist()
+            poly = Poly3DCollection([face_verts],
+                                    facecolors=[[0, 0, 0, 0]],  # Fully transparent
+                                    edgecolors='k',
+                                    linewidths=0.5,
+                                    linestyles='dashed')
+            ax.add_collection3d(poly)
+
+    # Add colorbar
+    mappable = ScalarMappable(norm=norm, cmap=cmap)
+    mappable.set_array(epseq_av)
+    cbar = fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, label="Equivalent strain")
+    cbar.ax.yaxis.set_major_formatter(FormatStrFormatter('%.2f'))
+
+    # Labels and view
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_box_aspect([1, 1, 1])  # Equal aspect ratio
+    ax.auto_scale_xyz(coor[:, 0], coor[:, 1], coor[:, 2])  # Ensure scaling works properly
+
+    # Optional save or show
     if args.save:
         fig.savefig('fixed-disp_contour_eps.pdf')
     else:
         plt.show()
 
-    plt.close(fig)
-
-    # plot
-    fig, ax = plt.subplots()
-    ax.plot(epseq, sigeq, c="r", label=r"LinearHardening")
-
-    # optional save
-    if args.save:
-        fig.savefig('fixed-disp_sig-eps.pdf')
-    else:
-        plt.show()
-
-    plt.close(fig)
+    plt.close(fig)    
