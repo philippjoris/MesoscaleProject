@@ -11,7 +11,7 @@ import random
 
 # define mesh
 print("running a GooseFEM static PBC example...")
-mesh = GooseFEM.Mesh.Hex8.Regular(5, 5, 5)
+mesh = GooseFEM.Mesh.Hex8.Regular(10, 10, 10)
 
 # mesh dimensions
 nelem = mesh.nelem
@@ -112,8 +112,8 @@ total_increment = np.zeros_like(disp)
 # deformation gradient
 F = np.array(
         [
-            [1.0 + (0.2/ninc), 0.0, 0.0],
-            [0.0, 1.0 / (1.0 + (0.2/ninc)), 0.0],
+            [1.0 + (0.15/ninc), 0.0, 0.0],
+            [0.0, 1.0 / (1.0 + (0.15/ninc)), 0.0],
             [0.0, 0.0, 1.0]
         ]
     )
@@ -189,7 +189,7 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     
     if converged:
          # print(total_increment)
-         initial_guess = 0.5 * total_increment
+         initial_guess = 0.3 * total_increment
     if not converged:
         raise RuntimeError(f"Load step {ilam} failed to converge.")
 

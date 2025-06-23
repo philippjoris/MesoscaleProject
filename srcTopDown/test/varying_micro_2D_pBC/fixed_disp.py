@@ -11,18 +11,20 @@ import random
 
 # define mesh
 print("running a GooseFEM static PBC example...")
-mesh = GooseFEM.Mesh.Quad4.Regular(10, 10)
+mesh = GooseFEM.Mesh.Quad4.Regular(20, 20)
+meshRefined = GooseFEM.Mesh.Quad4.Map.RefineRegular(mesh, 5, 5)
 
 # mesh dimensions
-nelem = mesh.nelem
-nne = mesh.nne
-ndim = mesh.ndim
-tyinglist = mesh.nodesPeriodic
+nelemCoarse = meshRefined.coarseMesh.nelem
+nelem = meshRefined.fineMesh.nelem
+nne = meshRefined.fineMesh.nne
+ndim = meshRefined.fineMesh.ndim
+tyinglist = meshRefined.fineMesh.nodesPeriodic
 
 # mesh definition
-coor = mesh.coor
-conn = mesh.conn
-dofs = mesh.dofs
+coor = meshRefined.fineMesh.coor
+conn = meshRefined.fineMesh.conn
+dofs = meshRefined.fineMesh.dofs
 
 # create control nodes
 control = GooseFEM.Tyings.Control(coor, dofs)
@@ -80,8 +82,9 @@ def randomizeMicrostr(nelem, nip, fraction_soft, value_hard, value_soft):
     return array
 # -------------------
 # mat = GMat.Elastic2d(K=np.ones([nelem, nip]), G=np.ones([nelem, nip]))
-tauy0 = randomizeMicrostr(nelem, nip, 0.7, .600, .200)
-mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=tauy0, H=np.ones([nelem, nip])*1)
+tauy0 = randomizeMicrostr(nelemCoarse, nip, 0.7, .600, .200)
+tauy0Fine = meshRefined.mapToFine(tauy0)
+mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=tauy0Fine, H=np.ones([nelem, nip])*0.2)
 
 # allocate system matrix
 K = GooseFEM.MatrixPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp)
@@ -183,7 +186,7 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     
     if converged:
          # print(total_increment)
-         initial_guess = 0.5 * total_increment
+         initial_guess = 0.2 * total_increment
     if not converged:
         raise RuntimeError(f"Load step {ilam} failed to converge.")
 
@@ -215,8 +218,8 @@ if args.plot:
     # plot stress
     fig, ax = plt.subplots(figsize=(8, 6))
     gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq_av, cmap="jet", axis=ax)
-    gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
-    ax.set_xlim(-1,13)
+    # gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
+    ax.set_xlim(-10,125)
     # ax.set_ylim(0,110)
     
     # Add colorbar
@@ -235,8 +238,8 @@ if args.plot:
     # plot strain
     fig, ax = plt.subplots(figsize=(8, 6))
     gplt.patch(coor=coor + disp, conn=conn, cindex=epseq_av, cmap="jet", axis=ax)
-    gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
-    ax.set_xlim(-1,13)
+    # gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
+    ax.set_xlim(-10,125)
     # ax.set_ylim(0,110)
     
     # Add colorbar
