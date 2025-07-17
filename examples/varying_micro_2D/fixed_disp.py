@@ -5,19 +5,22 @@ import GMatTensor.Cartesian3d
 import GMatElastoPlasticFiniteStrainSimo.Cartesian3d as GMat
 import GooseFEM
 import numpy as np
-from scipy.sparse.linalg import cg
-
+import random
+#
+# Example with 2D varying microstructure and fixed disp
+#
 # mesh
 # ----
 
 # define mesh
 print("running a GooseFEM static example...")
-mesh = GooseFEM.Mesh.Quad4.Regular(5, 5)
+mesh = GooseFEM.Mesh.Quad4.Regular(10, 10)
 
 # mesh dimensions
 nelem = mesh.nelem
 nne = mesh.nne
 ndim = mesh.ndim
+
 
 # mesh definition, displacement, external forces
 coor = mesh.coor
@@ -52,8 +55,17 @@ nip = elem.nip
 
 # material definition
 # -------------------
+def randomizeMicrostr(nelem, nip, fraction_soft, value_hard, value_soft):
+    array = np.ones([nelem, nip])*value_hard
+    nsoft = round(fraction_soft * nelem)
+    softelem = random.sample(range(nelem), k=nsoft)
+    for elem in softelem:
+        array[elem] *= (value_soft/value_hard)
+    return array
+# -------------------
 # mat = GMat.Elastic2d(K=np.ones([nelem, nip]), G=np.ones([nelem, nip]))
-mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*160000, G=np.ones([nelem, nip])*81000, tauy0=np.ones([nelem, nip])*600, H=np.ones([nelem, nip])*1)
+tauy0 = randomizeMicrostr(nelem, nip, 0.7, .600, .200)
+mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=tauy0, H=np.ones([nelem, nip])*1)
 
 # simulation variables
 # --------------------
@@ -86,14 +98,16 @@ sigeq = np.zeros(ninc)
 
 curr_increment = np.zeros_like(vector.AsDofs_u(disp))
 total_increment = np.zeros_like(vector.AsDofs_u(disp))
+
+initial_guess = np.zeros_like(vector.AsDofs_u(disp))
 # xp = np.zeros_like(vector.AsDofs_p(disp))
 for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     # store old displacement
     xp = vector.AsDofs_p(disp).copy()
 
     # update displacement
-    disp[mesh.nodesRightEdge, 0] += (+0.5/ninc)
-    disp[mesh.nodesTopEdge, 1] += (-0.5/ninc)
+    disp[mesh.nodesRightEdge, 0] += (+2.0/ninc)
+    disp[mesh.nodesTopEdge, 1] += (-0.8/ninc)
     disp[mesh.nodesLeftEdge, 0] = 0.0  # not strictly needed: default == 0
     disp[mesh.nodesBottomEdge, 1] = 0.0  # not strictly needed: default == 0
     
@@ -105,7 +119,9 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
 
     mat.increment()
 
-    curr_increment = total_increment.copy()
+    # impose initial guess on unknown displacements
+    disp = vector.NodeFromPartitioned(vector.AsDofs_u(disp) + initial_guess, vector.AsDofs_p(disp))
+
     total_increment[:] = 0.
     for iter in range(max_iter): 
         # update element wise displacments
@@ -114,8 +130,8 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         # update deformation gradient F
         elem.gradN_vector((coore + ue), mat.F)
         mat.F[:, :, 2, 2] = 1.0  # Add out-of-plane stretch = 1.0 (identity)
-        mat.refresh()  
-        
+        mat.refresh(tangent)  
+  
         # update internal forces and assemble
         fe = elem.Int_gradN_dot_tensor2_dV(mat.Sig)
         fint = vector.AssembleNode(fe)
@@ -126,7 +142,7 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         res_norm = np.linalg.norm(fres) 
         # print (f"Iter {iter}, Residual = {res_norm}")
         if res_norm < 1e-06:
-            print (f"Displacement {0.4*ilam/ninc} converged at Iter {iter}, Residual = {res_norm}")
+            print (f"Increment {ilam}/{ninc} converged at Iter {iter}, Residual = {res_norm}")
             converged = True
             break
 
@@ -135,14 +151,11 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         K.assemble(Ke)
 
         # solve
-        if iter == 0:
-            # Solver.solve_u(K, fres, delta_xp, curr_increment)
-            RHS = fres - K.data_up * delta_xp
-            curr_increment, info = cg(K.data_uu, RHS, x0=curr_increment, maxiter=200)
-        else:
-            # Solver.solve_u(K, fres, np.zeros_like(xp), curr_increment)
-            curr_increment, info = cg(K.data_uu, fres, x0=curr_increment, maxiter=200)
-
+        #if iter == 0:
+        #    Solver.solve_u(K, fres, delta_xp, curr_increment)
+        #else:
+        #    Solver.solve_u(K, fres, np.zeros_like(xp), curr_increment)
+        Solver.solve_u(K, fres, np.zeros_like(xp), curr_increment)
         # add newly found delta_u to total increment
         total_increment += curr_increment
         # update displacement vector
@@ -151,12 +164,14 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     # accumulate strains and stresses
     epseq[ilam] = np.average(GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1)))
     sigeq[ilam] = np.average(GMat.Sigeq(np.average(mat.Sig, axis=1)))
-
-
     
+    if converged:
+        initial_guess = initial_guess + total_increment
     if not converged:
         raise RuntimeError(f"Load step {ilam} failed to converge.")
 
+
+print(fint)
 # post-process
 # ------------
 # strain
@@ -186,6 +201,7 @@ if args.plot:
     import GooseMPL as gplt
     import matplotlib.pyplot as plt
     from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
 
     plt.style.use(["goose", "goose-latex"])
 
@@ -193,15 +209,36 @@ if args.plot:
     dV = elem.AsTensor(2, elem.dV)
     Sigav = np.average(mat.Sig, weights=dV, axis=1)
     sigeq_av = GMat.Sigeq(Sigav)
-
     # Average eq. strain per element
     epseq_av = GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1))
 
-    # plot
-    fig, ax = plt.subplots()
-    gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq, cmap="jet", axis=ax, clim=(0, 0.1))
-    gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
+    # plot stress
+    fig, ax = plt.subplots(figsize=(8, 6))
+    gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq_av, cmap="jet", axis=ax)
+    # gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
+    ax.set_xlim(0,130)
+    ax.set_ylim(0,110)
+    
+    # Add colorbar
+    mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
+    mappable.set_array(sigeq_av)
+    fig.colorbar(mappable, ax=ax, shrink=0.5, aspect=10, label="Equivalent mises stress")
 
+    # optional save
+    if args.save:
+        fig.savefig('fixed-disp_contour_sig.pdf')
+    else:
+        plt.show()
+
+    plt.close(fig)
+
+    # plot strain
+    fig, ax = plt.subplots(figsize=(8, 6))
+    gplt.patch(coor=coor + disp, conn=conn, cindex=epseq_av, cmap="jet", axis=ax)
+    # gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
+    ax.set_xlim(0,130)
+    ax.set_ylim(0,110)
+    
     # Add colorbar
     mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
     mappable.set_array(epseq_av)
@@ -209,7 +246,7 @@ if args.plot:
 
     # optional save
     if args.save:
-        fig.savefig('fixed-disp_contour.pdf')
+        fig.savefig('fixed-disp_contour_eps.pdf')
     else:
         plt.show()
 

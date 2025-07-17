@@ -8,9 +8,13 @@
             "name": "Python Debugger: Current File",
             "type": "debugpy",
             "request": "launch",
+            "cwd": "${workspaceFolder}",
             "program": "${file}",
             "console": "integratedTerminal",
-            "python": "/home/20250672/.conda/envs/simo_copy/bin/python"
+            "python": "/home/20250672/.conda/envs/simo_copy/bin/python",
+            "env": {
+                    "PYTHONPATH": "${workspaceFolder}"
+                }
         }
     ]
 }

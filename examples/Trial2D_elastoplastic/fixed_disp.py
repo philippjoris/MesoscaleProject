@@ -1,16 +1,20 @@
 import argparse
 import sys
+import os
 
 import GMatTensor.Cartesian3d
 import GMatElastoPlasticFiniteStrainSimo.Cartesian3d as GMat
 import GooseFEM
 import numpy as np
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
+
 # mesh
 # ----
 
 # define mesh
 print("running a GooseFEM static example...")
-mesh = GooseFEM.Mesh.Quad4.Regular(5, 5)
+mesh = GooseFEM.Mesh.Quad4.Regular(10, 10)
 
 # mesh dimensions
 nelem = mesh.nelem
@@ -38,43 +42,44 @@ iip = np.concatenate(
 # --------------------
 
 # vector definition
-vector = GooseFEM.VectorPartitioned(conn, dofs, iip)
+vector = GooseFEM.VectorPartitioned(dofs, iip)
 
 # allocate system matrix
-K = GooseFEM.MatrixPartitioned(conn, dofs, iip)
+K = GooseFEM.MatrixPartitioned(dofs, iip)
 Solver = GooseFEM.MatrixPartitionedSolver()
 
 # element definition
-elem = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor))
+elem = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor, conn))
 nip = elem.nip
 
 # material definition
 # -------------------
 # mat = GMat.Elastic2d(K=np.ones([nelem, nip]), G=np.ones([nelem, nip]))
-mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=np.ones([nelem, nip])*.600, H=np.ones([nelem, nip])*1)
+mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=np.ones([nelem, nip])*.600, H=np.ones([nelem, nip])*3)
 
 # simulation variables
 # --------------------
-ue = vector.AsElement(disp)
-coore = vector.AsElement(coor)
+ue = vector.AsElement(disp, conn)
+coore = vector.AsElement(coor, conn)
 elem.gradN_vector((coore + ue), mat.F)
 mat.F[:, :, 2, 2] = 1.0  # Add out-of-plane stretch = 1.0 (identity)
 mat.refresh()
 
 # internal force of the right hand side per element and assembly
 fe = elem.Int_gradN_dot_tensor2_dV(mat.Sig)
-fint = vector.AssembleNode(fe)
+fint = vector.AssembleNode(fe, conn)
 
 # initial element tangential stiffness matrix incorporating the geometrical and material stiffness matrix
 Ke = elem.Int_gradN_dot_tensor4_dot_gradNT_dV(mat.C)
-K.assemble(Ke)
-
+K.clear()
+K.assemble(Ke, conn)
+K.finalize()
 # initial residual
 fres = fext - fint
 
 # solve
 # -----
-ninc = 501
+ninc = 801
 max_iter = 70
 tangent = True
 
@@ -92,13 +97,10 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     xp = vector.AsDofs_p(disp).copy()
 
     # update displacement
-    disp[mesh.nodesRightEdge, 0] += (+2.0/ninc)
-    disp[mesh.nodesTopEdge, 1] += (-0.5/ninc)
+    disp[mesh.nodesRightEdge, 0] += (+3.2/ninc)
+    disp[mesh.nodesTopEdge, 1] += (-0.8/ninc)
     disp[mesh.nodesLeftEdge, 0] = 0.0  # not strictly needed: default == 0
     disp[mesh.nodesBottomEdge, 1] = 0.0  # not strictly needed: default == 0
-    
-    # new displacement increment
-    delta_xp = vector.AsDofs_p(disp) - xp
 
     # convergence flag
     converged = False
@@ -112,27 +114,20 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     total_increment = initial_guess.copy()
     for iter in range(max_iter): 
         # update element wise displacments
-        ue = vector.AsElement(disp) 
+        ue = vector.AsElement(disp, conn)
 
         # update deformation gradient F
-        elem.gradN_vector((coore + ue), mat.F)
+        elem.symGradN_vector((coore + ue), mat.F)
         mat.F[:, :, 2, 2] = 1.0  # Add out-of-plane stretch = 1.0 (identity)
         mat.refresh(tangent)  
-        
-        # F.shape = (elem, IP, 3, 3)
-        J = np.linalg.det(mat.F)  # J.shape = (elem, IP)
-        F_inv = np.linalg.inv(mat.F)
-        F_inv_T = np.transpose(F_inv, axes=(0, 1, 3, 2))
-        tau = J[..., None, None] * mat.Sig
-        P = np.matmul(tau, F_inv_T)
-        P_T = np.transpose(P, axes=(0, 1, 3, 2))
   
         # update internal forces and assemble
         fe = elem.Int_gradN_dot_tensor2_dV(mat.Sig)
-        fint = vector.AssembleNode(fe)
+        fint = vector.AssembleNode(fe, conn) 
+
 
         # residual 
-        fres = -vector.AsDofs_u(fint)
+        fres = vector.AsDofs_u(fext) - vector.AsDofs_u(fint)
         
         res_norm = np.linalg.norm(fres) 
         # print (f"Iter {iter}, Residual = {res_norm}")
@@ -142,8 +137,11 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
             break
 
         # update stiffness matrix
+        
         Ke = elem.Int_gradN_dot_tensor4_dot_gradNT_dV(mat.C)
-        K.assemble(Ke)
+        K.clear()
+        K.assemble(Ke, conn)
+        K.finalize()
 
         # solve
         #if iter == 0:
@@ -160,12 +158,12 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     epseq[ilam] = np.average(GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1)))
     sigeq[ilam] = np.average(GMat.Sigeq(np.average(mat.Sig, axis=1)))
     if converged:
-        initial_guess = total_increment
-        print(np.mean(mat.Sig, axis=1)[0])
+        initial_guess = 1 * total_increment
     if not converged:
         raise RuntimeError(f"Load step {ilam} failed to converge.")
 
-
+print(disp)
+print(coor)
 # post-process
 # ------------
 # strain
@@ -175,7 +173,7 @@ mat.refresh()
 
 # internal force
 elem.int_gradN_dot_tensor2_dV(mat.Sig, fe)
-vector.assembleNode(fe, fint)
+vector.assembleNode(fe, conn, fint)
 
 # apply reaction force
 vector.copy_p(fint, fext)
@@ -195,7 +193,6 @@ if args.plot:
     import GooseMPL as gplt
     import matplotlib.pyplot as plt
     from matplotlib.cm import ScalarMappable
-    print(plt.style.available)
     
 
     plt.style.use(["goose", "goose-latex"])
@@ -210,8 +207,8 @@ if args.plot:
 
     # plot
     fig, ax = plt.subplots()
-    gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq, cmap="jet", axis=ax, clim=(0, 0.1))
     gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
+    gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq, cmap="jet", axis=ax, clim=(0, 0.1))
 
     # Add colorbar
     mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
@@ -220,7 +217,7 @@ if args.plot:
 
     # optional save
     if args.save:
-        fig.savefig('fixed-disp_contour.pdf')
+        fig.savefig(os.path.join(script_dir, 'fixed-disp_contour.pdf'))
     else:
         plt.show()
 
@@ -233,7 +230,7 @@ if args.plot:
     ax.set_ylabel("eq. mises stress (GPa)")
     # optional save
     if args.save:
-        fig.savefig('fixed-disp_sig-eps.pdf')
+        fig.savefig(os.path.join(script_dir, 'fixed-disp_sig-eps.pdf'))
     else:
         plt.show()
 

@@ -27,8 +27,8 @@ fext = np.zeros_like(coor)
 # list of prescribed DOFs
 iip = np.concatenate(
     (
-        dofs[mesh.nodesRightEdge, 0],
-        dofs[mesh.nodesTopEdge, 1],
+        # dofs[mesh.nodesRightEdge, 0],
+        # dofs[mesh.nodesTopEdge, 1],
         dofs[mesh.nodesLeftEdge, 0],
         dofs[mesh.nodesBottomEdge, 1],
     )
@@ -84,13 +84,14 @@ curr_increment = np.zeros_like(vector.AsDofs_u(disp))
 total_increment = np.zeros_like(vector.AsDofs_u(disp))
 
 initial_guess = np.zeros_like(vector.AsDofs_u(disp))
+
 for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     # store old displacement
     xp = vector.AsDofs_p(disp).copy()
 
     # introduce new displacement increment
-    disp[mesh.nodesRightEdge, 0] += (+2.0/ninc)
-    disp[mesh.nodesTopEdge, 1] += (-2.0/ninc)
+    fext[mesh.nodesRightEdge, 0] += (+2.0/ninc)
+    fext[mesh.nodesTopEdge, 1] += (-2.0/ninc)
     disp[mesh.nodesLeftEdge, 0] = 0.0  # not strictly needed: default == 0
     disp[mesh.nodesBottomEdge, 1] = 0.0  # not strictly needed: default == 0
 
@@ -126,7 +127,7 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         fint = vector.AssembleNode(fe)
 
         # residual
-        fres = -vector.AsDofs_u(fint)
+        fres = vector.AsDofs_u(fext)-vector.AsDofs_u(fint)
         
         res_norm = np.linalg.norm(fres) 
         if res_norm < 1e-06:
@@ -153,6 +154,8 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         initial_guess = total_increment
     if not converged:
         raise RuntimeError(f"Load step {ilam} failed to converge.")
+
+print(fint)
 # post-process
 # ------------
 # strain

@@ -6,70 +6,53 @@ import GMatElastoPlasticFiniteStrainSimo.Cartesian3d as GMat
 import GooseFEM
 import numpy as np
 import random
+#
+# Example with 2D varying microstructure and fixed load
+#
 # mesh
 # ----
 
 # define mesh
-print("running a GooseFEM static PBC example...")
-mesh = GooseFEM.Mesh.Quad4.Regular(20, 20)
-meshRefined = GooseFEM.Mesh.Quad4.Map.RefineRegular(mesh, 5, 5)
+print("running a GooseFEM static example...")
+mesh = GooseFEM.Mesh.Quad4.Regular(10, 10)
 
 # mesh dimensions
-nelemCoarse = meshRefined.coarseMesh.nelem
-nelem = meshRefined.fineMesh.nelem
-nne = meshRefined.fineMesh.nne
-ndim = meshRefined.fineMesh.ndim
-tyinglist = meshRefined.fineMesh.nodesPeriodic
+nelem = mesh.nelem
+nne = mesh.nne
+ndim = mesh.ndim
 
-# mesh definition
-coor = meshRefined.fineMesh.coor
-conn = meshRefined.fineMesh.conn
-dofs = meshRefined.fineMesh.dofs
 
-# create control nodes
-control = GooseFEM.Tyings.Control(coor, dofs)
+# mesh definition, displacement, external forces
+coor = mesh.coor
+conn = mesh.conn
+dofs = mesh.dofs
+disp = np.zeros_like(coor)
+fext = np.zeros_like(coor)
 
-# add control nodes
-coor = control.coor
-
-# list of prescribed DOFs (fixed node + control nodes)
-iip = np.concatenate((
-    dofs[np.array([mesh.nodesBottomLeftCorner]), 0],
-    dofs[np.array([mesh.nodesBottomLeftCorner]), 1],
-    control.controlDofs[0],
-    control.controlDofs[1]
-))
-
-# initialize my periodic boundary condition class
-periodicity = GooseFEM.Tyings.Periodic(coor, control.dofs, control.controlDofs, tyinglist, iip)
-dofs = periodicity.dofs
+# list of prescribed DOFs
+iip = np.concatenate(
+    (
+        # dofs[mesh.nodesRightEdge, 0],
+        # dofs[mesh.nodesTopEdge, 1],        
+        dofs[mesh.nodesLeftEdge, 0],
+        dofs[mesh.nodesBottomEdge, 1],
+    )
+)
 
 # simulation variables
 # --------------------
 
 # vector definition
-vector = GooseFEM.VectorPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp, periodicity.Cdi)
+vector = GooseFEM.VectorPartitioned(conn, dofs, iip)
+
+# allocate system matrix
+K = GooseFEM.MatrixPartitioned(conn, dofs, iip)
+Solver = GooseFEM.MatrixPartitionedSolver()
 
 # element definition
 elem0 = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor))
 elem = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor))
 nip = elem.nip
-
-# nodal quantities
-disp = np.zeros_like(coor)
-du = np.zeros_like(coor)  # iterative displacement update
-fint = np.zeros_like(coor)  # internal force
-fext = np.zeros_like(coor)  # external force
-
-# element vectors / matrix
-ue = vector.AsElement(disp)
-coore = vector.AsElement(coor)
-fe = np.empty([nelem, nne, ndim])
-Ke = np.empty([nelem, nne * ndim, nne * ndim])
-
-# DOF values
-Fext = np.zeros([periodicity.nni])
-Fint = np.zeros([periodicity.nni])
 
 # material definition
 # -------------------
@@ -82,13 +65,27 @@ def randomizeMicrostr(nelem, nip, fraction_soft, value_hard, value_soft):
     return array
 # -------------------
 # mat = GMat.Elastic2d(K=np.ones([nelem, nip]), G=np.ones([nelem, nip]))
-tauy0 = randomizeMicrostr(nelemCoarse, nip, 0.7, .600, .200)
-tauy0Fine = meshRefined.mapToFine(tauy0)
-mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=tauy0Fine, H=np.ones([nelem, nip])*0.2)
+tauy0 = randomizeMicrostr(nelem, nip, 0.7, .600, .200)
+mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=tauy0, H=np.ones([nelem, nip])*1)
 
-# allocate system matrix
-K = GooseFEM.MatrixPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp)
-Solver = GooseFEM.MatrixPartitionedTyingsSolver()
+# simulation variables
+# --------------------
+ue = vector.AsElement(disp)
+coore = vector.AsElement(coor)
+elem.gradN_vector((coore + ue), mat.F)
+mat.F[:, :, 2, 2] = 1.0  # Add out-of-plane stretch = 1.0 (identity)
+mat.refresh()
+
+# internal force of the right hand side per element and assembly
+fe = elem.Int_gradN_dot_tensor2_dV(mat.Sig)
+fint = vector.AssembleNode(fe)
+
+# initial element tangential stiffness matrix incorporating the geometrical and material stiffness matrix
+Ke = elem.Int_gradN_dot_tensor4_dot_gradNT_dV(mat.C)
+K.assemble(Ke)
+
+# initial residual
+fres = fext - fint
 
 # array of unit tensor
 I2 = GMatTensor.Cartesian3d.Array2d(mat.shape).I2
@@ -103,96 +100,96 @@ tangent = True
 epseq = np.zeros(ninc)
 sigeq = np.zeros(ninc)
 
-# ue = vector.AsElement(disp)
-# du = np.zeros_like(disp)
-initial_guess = np.zeros_like(disp)
+du = np.zeros_like(disp)
 total_increment = np.zeros_like(disp)
 
-# deformation gradient
-F = np.array(
-        [
-            [1.0 + (0.2/ninc), 0.0],
-            [0.0, 1.0 / (1.0 + (0.2/ninc))]
-        ]
-    )
-
+initial_guess = np.zeros_like(disp)
+# xp = np.zeros_like(vector.AsDofs_p(disp))
 for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
 
+    # update forces
+    fext[mesh.nodesRightEdge, 0] += (+20.0/ninc)
+    fext[mesh.nodesTopEdge, 1] += (-8.0/ninc)
+
+    # update displacement
+    disp[mesh.nodesLeftEdge, 0] = 0.0  # not strictly needed: default == 0
+    disp[mesh.nodesBottomEdge, 1] = 0.0  # not strictly needed: default == 0
+
+    # convergence flag
     converged = False
 
     mat.increment()
+    total_increment.fill(0.0)
+    for iter in range(max_iter): 
+        # update element wise displacments
+        vector.asElement(disp, ue) 
 
-    disp += initial_guess
-    total_increment = initial_guess.copy()
-    for iter in range(max_iter):  
-        # deformation gradient
-        vector.asElement(disp, ue)
-        elem0.symGradN_vector(ue, mat.F)
+        # update deformation gradient F
+        elem0.gradN_vector((ue), mat.F)
         mat.F += I2
-        mat.refresh(tangent)  
-
-        # internal force
+        mat.refresh()  
+  
+        # update internal forces and assemble
         elem.int_gradN_dot_tensor2_dV(mat.Sig, fe)
         vector.assembleNode(fe, fint)
 
-        # stiffness matrix
+        # vector.copy_p(fint, fext)
+
+        # residual 
+        fresnorm = vector.AsDofs_u(fext) - vector.AsDofs_u(fint)
+        fres = fext - fint
+        
+        res_norm = np.linalg.norm(fres) 
+        res_norm2 = np.linalg.norm(fresnorm)
+        # print (f"Iter {iter}, Residual = {res_norm}")
+        if res_norm2 < 1e-06:
+            print (f"Increment {ilam}/{ninc} converged at Iter {iter}, Residual = {res_norm}")
+            converged = True
+            break
+
+        # update stiffness matrix
         elem.int_gradN_dot_tensor4_dot_gradNT_dV(mat.C, Ke)
         K.assemble(Ke)
 
-        # residual
-        fres = fext - fint
-
-        if iter > 0:
-            # - internal/external force as DOFs (account for periodicity)
-            vector.asDofs_i(fext, Fext)
-            vector.asDofs_i(fint, Fint)
-            # - extract reaction force
-            vector.copy_p(Fint, Fext)
-            # - norm of the residual and the reaction force
-            nfres = np.sum(np.abs(Fext - Fint))
-            nfext = np.sum(np.abs(Fext))
-            # - relative residual, for convergence check
-            if nfext:
-                res = nfres / nfext
-            else:
-                res = nfres
-            # print (f"Iter {iter}, Residual = {res_norm}")
-            if iter > 10:
-                a = 1
-            if res < 1e-06:
-                print (f"Increment {ilam}/{ninc} converged at Iter {iter}, Residual = {res}")
-                converged = True
-                break
-
-        du.fill(0.0)
-
-        # initialise displacement update
-        if iter == 0:
-            du[control.controlNodes, 0] = (F[0,:] - np.eye(2)[0, :]) 
-            du[control.controlNodes, 1] = (F[1,:] - np.eye(2)[1, :])  
-
         # solve
+        du.fill(0.0)
         Solver.solve(K, fres, du)
-        
-        # add delta u
-        disp += du
+
+        # add newly found delta_u to total increment
         total_increment += du
 
+        # update displacement vector
+        disp += du
+        
         elem.update_x(vector.AsElement(coor + disp))
 
     # accumulate strains and stresses
     epseq[ilam] = np.average(GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1)))
     sigeq[ilam] = np.average(GMat.Sigeq(np.average(mat.Sig, axis=1)))
     
-    if converged:
-         # print(total_increment)
-         initial_guess = 0.2 * total_increment
     if not converged:
         raise RuntimeError(f"Load step {ilam} failed to converge.")
 
 
+print(disp)
 # post-process
 # ------------
+# strain
+elem.gradN_vector((ue), mat.F)
+mat.F += I2
+mat.refresh()  
+
+# internal force
+elem.int_gradN_dot_tensor2_dV(mat.Sig, fe)
+vector.assembleNode(fe, fint)
+
+# apply reaction force
+vector.copy_p(fint, fext)
+
+# residual
+fres = fext - fint
+# print residual
+assert np.isclose(np.sum(np.abs(fres)) / np.sum(np.abs(fext)), 0,  atol=1e-6)
 # plot
 # ----
 parser = argparse.ArgumentParser()
@@ -206,7 +203,7 @@ if args.plot:
     from matplotlib.cm import ScalarMappable
     from matplotlib.colors import Normalize
 
-    # plt.style.use(["goose", "goose-latex"])
+    plt.style.use(["goose", "goose-latex"])
 
     # Average equivalent stress per element
     dV = elem.AsTensor(2, elem.dV)
@@ -219,8 +216,8 @@ if args.plot:
     fig, ax = plt.subplots(figsize=(8, 6))
     gplt.patch(coor=coor + disp, conn=conn, cindex=sigeq_av, cmap="jet", axis=ax)
     # gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
-    ax.set_xlim(-10,125)
-    # ax.set_ylim(0,110)
+    ax.set_xlim(0,130)
+    ax.set_ylim(0,110)
     
     # Add colorbar
     mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
@@ -239,8 +236,8 @@ if args.plot:
     fig, ax = plt.subplots(figsize=(8, 6))
     gplt.patch(coor=coor + disp, conn=conn, cindex=epseq_av, cmap="jet", axis=ax)
     # gplt.patch(coor=coor, conn=conn, linestyle="--", axis=ax)
-    ax.set_xlim(-10,125)
-    # ax.set_ylim(0,110)
+    ax.set_xlim(0,130)
+    ax.set_ylim(0,110)
     
     # Add colorbar
     mappable = ScalarMappable(norm=plt.Normalize(), cmap=plt.colormaps["jet"])
