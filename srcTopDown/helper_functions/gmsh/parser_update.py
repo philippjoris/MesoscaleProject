@@ -8,7 +8,6 @@ A helper function to parse gmsh files with a cohesive zone to FEM format.
 
 import numpy as np
 import collections
-import math
 
 def parse_msh(msh_filepath, cohesive_line_names=["CohesiveInterface", "CohesiveParticle"], tolerance=1e-3):
     """
@@ -34,7 +33,7 @@ def parse_msh(msh_filepath, cohesive_line_names=["CohesiveInterface", "CohesiveP
             - 'conn_CohesiveParticle': numpy.ndarray of shape (M, 4), where M is the number of cohesive elements
                                         for CohesiveParticle (node IDs are 0-indexed)
             - 'conn_bulk': numpy.ndarray of shape (P, 4), where P is the number of bulk elements
-                                (node IDs are 0-indexed)
+                            (node IDs are 0-indexed)
             - Other physical line names as keys, with values being numpy.ndarray of 0-indexed node IDs,
               sorted by X-coordinate or traversed order as appropriate.
               These include all 1D physical lines EXCEPT the cohesive lines.
@@ -124,7 +123,7 @@ def parse_msh(msh_filepath, cohesive_line_names=["CohesiveInterface", "CohesiveP
     
     # Map: {original_node_id: {interface_name: duplicated_node_id}}
     # The original node_id will serve as the "bottom" or "inner" side.
-    # This dublicated node will serve as the "top" or "outer" side.     
+    # This dublicated node will serve as the "top" or "outer" side.    
     interface_node_duplicates = {name: {} for name in cohesive_line_names}
 
     next_available_node_id = max_node_id + 1
@@ -173,102 +172,122 @@ def parse_msh(msh_filepath, cohesive_line_names=["CohesiveInterface", "CohesiveP
                 current_cohesive_elements_conn.append([id_bl, id_br, id_tr, id_tl]) # Node IDs are 1-indexed at this stage
 
         elif interface_name == "CohesiveParticle":
-            # --- Robust Traversal and Orientation for CohesiveParticle contours ---
+            # Graph traversal for "CohesiveParticle" to order elements along the contour
             
-            # Map nodes to elements for graph traversal
-            # node_id -> list of element_ids
-            node_to_element_map = collections.defaultdict(list)
-            # element_id -> element data (nodes)
-            elem_id_to_data_map = {elem['id']: elem for elem in cohesive_line_elements_by_name[interface_name]}
+            # 1. Build a map of nodes to their cohesive line elements for *this* particle interface
+            particle_node_to_elements = collections.defaultdict(list)
+            for line_elem in cohesive_line_elements_by_name[interface_name]:
+                for node_id in line_elem['nodes']:
+                    particle_node_to_elements[node_id].append(line_elem)
+
+            all_particle_elements = list(cohesive_line_elements_by_name[interface_name])
+            processed_element_ids = set()
             
-            for elem in cohesive_line_elements_by_name[interface_name]:
-                node_to_element_map[elem['nodes'][0]].append(elem['id'])
-                node_to_element_map[elem['nodes'][1]].append(elem['id'])
+            # This list will store ordered sequences for potentially multiple disconnected particles
+            all_ordered_particle_contours = []
 
-            all_cohesive_particle_element_ids = set(elem_id_to_data_map.keys())
-            processed_element_ids = set() # Keep track of elements already assigned to a contour
+            # Loop to find all distinct particle contours/lines
+            while len(processed_element_ids) < len(all_particle_elements):
+                # Find an un-processed element to start a new contour
+                start_elem = None
+                for elem in all_particle_elements:
+                    if elem['id'] not in processed_element_ids:
+                        start_elem = elem
+                        break
+                
+                if start_elem is None: # No more un-processed elements
+                    break # All elements have been processed
 
-            # Loop to find all distinct particle contours
-            while len(processed_element_ids) < len(all_cohesive_particle_element_ids):
-                # Find an unprocessed element to start a new contour
-                start_elem_id = next(iter(all_cohesive_particle_element_ids - processed_element_ids), None)
-                if start_elem_id is None:
-                    break # All elements processed
+                # Pick a starting node for this contour.
+                # For a closed loop, any node works, but for consistency, pick one
+                # For an open line, pick an end node (node connected to only one element of this type)
+                
+                # Heuristic: Find a node that is an 'end' node (degree 1 in the cohesive graph)
+                # or if a closed loop, pick the first node of the start_elem.
+                start_node_for_contour = None
+                for node_id in start_elem['nodes']:
+                    if len(particle_node_to_elements[node_id]) == 1: # This is an end node
+                        start_node_for_contour = node_id
+                        break
+                if start_node_for_contour is None: # It's a closed loop or all nodes have degree > 1
+                    # Choose the node with minimum X, then minimum Y as a consistent start for closed loops
+                    # within the nodes of the current start_elem.
+                    start_node_for_contour = sorted(start_elem['nodes'], key=lambda n_id: (coor[n_id - 1, 0], coor[n_id - 1, 1]))[0]
 
-                # Perform a traversal (DFS/BFS) to find all elements and nodes in this specific contour
-                current_contour_elements = []
-                current_contour_nodes = set()
-                queue = collections.deque([start_elem_id])
-                visited_elements_in_this_contour = set()
+                current_node_id = start_node_for_contour
+                previous_node_id = None # Used to track the direction of traversal
 
-                while queue:
-                    elem_id = queue.popleft()
-                    if elem_id in visited_elements_in_this_contour:
-                        continue
-                    visited_elements_in_this_contour.add(elem_id)
-                    processed_element_ids.add(elem_id) # Mark as globally processed
+                current_contour_ordered_elements = []
+
+                # Traverse the current contour
+                while True:
+                    next_elem_found = False
                     
-                    elem_data = elem_id_to_data_map[elem_id]
-                    current_contour_elements.append(elem_data)
-                    
-                    for node_id in elem_data['nodes']:
-                        current_contour_nodes.add(node_id)
-                        # Add adjacent elements
-                        for connected_elem_id in node_to_element_map[node_id]:
-                            if connected_elem_id not in visited_elements_in_this_contour:
-                                queue.append(connected_elem_id)
-                
-                if not current_contour_elements:
-                    continue # Should not happen if start_elem_id was valid
+                    # Find potential next elements from current_node_id
+                    candidate_elements = [e for e in particle_node_to_elements[current_node_id] if e['id'] not in processed_element_ids]
 
-                # Calculate the center of the current contour
-                contour_nodes_coords = [coor[n_id - 1] for n_id in current_contour_nodes]
-                contour_center = np.mean(contour_nodes_coords, axis=0)
-                
-                # Sort all nodes within this contour by angle relative to the center
-                # This ensures a consistent (e.g., CCW) ordering
-                sorted_nodes_by_angle = []
-                for node_id in current_contour_nodes:
-                    node_coords = coor[node_id - 1]
-                    angle = math.atan2(node_coords[1] - contour_center[1], node_coords[0] - contour_center[0])
-                    sorted_nodes_by_angle.append((angle, node_id))
-                
-                sorted_nodes_by_angle.sort()
-                
-                # Extract only the node IDs in sorted order
-                ordered_contour_node_ids = [node_id for angle, node_id in sorted_nodes_by_angle]
+                    if not candidate_elements: # No un-processed elements connected to current_node
+                        break # End of this contour
 
-                # Now, reconstruct the cohesive elements based on the ordered_contour_node_ids
-                # We need to find the pairs of nodes that constitute actual 1D elements in Gmsh
-                # For a closed loop, the last node connects back to the first.
-                num_ordered_nodes = len(ordered_contour_node_ids)
-                
-                if num_ordered_nodes < 2: # Need at least two nodes to form an element
-                    print(f"Warning: Contour with less than 2 ordered nodes found. Skipping cohesive elements for this contour.")
-                    continue
+                    # Logic to select the 'next' element and orient nodes
+                    if len(candidate_elements) == 1:
+                        # Simple case: only one path forward
+                        next_elem = candidate_elements[0]
+                    else:
+                        # More complex: current_node_id is part of a bifurcation or a return point.
+                        # This typically happens only if `previous_node_id` is None (first element)
+                        # or if there's an actual mesh error/discontinuity.
+                        # For a well-formed line, there should usually be only one unvisited next element.
+                        # We pick one that doesn't immediately go back to the previous node.
+                        next_elem = None
+                        for cand_elem in candidate_elements:
+                            other_node_in_cand = next(n for n in cand_elem['nodes'] if n != current_node_id)
+                            if other_node_in_cand != previous_node_id:
+                                next_elem = cand_elem
+                                break
+                        if next_elem is None: # Should not happen for valid single contours
+                            print(f"Warning: Stalled traversal at node {current_node_id}. Possible complex geometry or mesh error.")
+                            break
 
-                # Create a set of existing 1D element node pairs for quick lookup
-                existing_line_node_pairs = set()
-                for elem_data in current_contour_elements:
-                    n1, n2 = elem_data['nodes']
-                    existing_line_node_pairs.add(tuple(sorted((n1, n2))))
+                    current_contour_ordered_elements.append(next_elem)
+                    processed_element_ids.add(next_elem['id'])
 
+                    # Determine the next current_node_id for the traversal
+                    old_current_node_id = current_node_id
+                    current_node_id = next(n for n in next_elem['nodes'] if n != current_node_id)
+                    previous_node_id = old_current_node_id
+                    next_elem_found = True
 
-                for i in range(num_ordered_nodes):
-                    n1_orig = ordered_contour_node_ids[i]
-                    # The next node in the ordered sequence (circularly for closed contours)
-                    n2_orig = ordered_contour_node_ids[(i + 1) % num_ordered_nodes]
+                if current_contour_ordered_elements:
+                    all_ordered_particle_contours.append(current_contour_ordered_elements)
 
-                    # Check if this (n1_orig, n2_orig) pair forms an actual 1D line element in the mesh
-                    # This check is crucial to avoid "phantom" elements if the angular sorting isn't perfect
-                    # or if there are gaps in the mesh.
-                    if tuple(sorted((n1_orig, n2_orig))) not in existing_line_node_pairs:
-                        print(f"Warning: No actual 1D line element found in mesh for ordered node pair ({n1_orig}, {n2_orig}) within CohesiveParticle contour. Skipping cohesive element creation for this pair.")
-                        continue
+            # Now, use the ordered contours to build the cohesive element connectivity
+            for contour_elements in all_ordered_particle_contours:
+                for i, line_elem in enumerate(contour_elements):
+                    # Determine n1_orig (bottom-left) and n2_orig (bottom-right)
+                    # The order of nodes in the 'line_elem' from Gmsh is usually consistent along the curve.
+                    # We just need to make sure 'n1_orig' is the node we entered the element from
+                    # and 'n2_orig' is the node we're leaving to for consistent element definition.
 
-                    # Cohesive element connectivity: [bottom-left, bottom-right, top-right, top-left]
-                    # "Bottom" (original) nodes are on the particle side (inner)
-                    # "Top" (duplicated) nodes are on the matrix side (outer)
+                    if i == 0: # First element in the contour
+                        # For the very first element of a contour, we need to decide its 'start' and 'end' node.
+                        # We make 'n1_orig' the node closest to the start_node_for_contour that initiated this specific contour.
+                        n1_candidate, n2_candidate = line_elem['nodes']
+                        if n1_candidate == start_node_for_contour:
+                             n1_orig, n2_orig = n1_candidate, n2_candidate
+                        else:
+                             n1_orig, n2_orig = n2_candidate, n1_candidate
+                    else:
+                        # For subsequent elements, ensure the order is continuous from the previous element.
+                        prev_elem = contour_elements[i-1]
+                        # The 'second' node of the previous element should be the 'first' node of the current element.
+                        expected_n1 = next(n for n in prev_elem['nodes'] if n != previous_node_id) # The node that was current_node_id
+                        
+                        if line_elem['nodes'][0] == expected_n1:
+                            n1_orig, n2_orig = line_elem['nodes'][0], line_elem['nodes'][1]
+                        else:
+                            n1_orig, n2_orig = line_elem['nodes'][1], line_elem['nodes'][0]
+
                     id_bl = n1_orig
                     id_br = n2_orig
                     id_tl = current_node_map[n1_orig]
@@ -301,31 +320,31 @@ def parse_msh(msh_filepath, cohesive_line_names=["CohesiveInterface", "CohesiveP
 
                 # Logic for mapping node based on which bulk domain it's in and which interface it touches
 
-                # Case 1: Bulk element is UpperDomain (matrix above Y=0)
+                # Case 1: Bulk element is UpperDomain
                 if bulk_phys_tag == upper_domain_tag:
-                    # Nodes on the bottom boundary of UpperDomain (at Y=0 or touching a particle)
-                    # should connect to the *top/outer* side of the cohesive elements.
+                    # Check for CohesiveInterface connection
                     if cohesive_interface_tag is not None and cohesive_interface_tag in node_line_tags:
                         updated_node_ids[i] = interface_node_duplicates['CohesiveInterface'][original_node_id]
                     elif cohesive_particle_tag is not None and cohesive_particle_tag in node_line_tags:
                         updated_node_ids[i] = interface_node_duplicates['CohesiveParticle'][original_node_id]
                         
-                # Case 2: Bulk element is LowerDomain (matrix below Y=0)
+                # Case 2: Bulk element is LowerDomain
                 elif bulk_phys_tag == lower_domain_tag:
-                    # Nodes on the top boundary of LowerDomain (at Y=0 or touching a particle)
-                    # For Y=0: should connect to the *bottom/inner* side of CohesiveInterface (retain original ID)
-                    # For particle: should connect to the *top/outer* side of CohesiveParticle (use duplicated ID)
                     if cohesive_interface_tag is not None and cohesive_interface_tag in node_line_tags:
-                        pass # Retain original ID, connects to original (bottom) side of CohesiveInterface
+                        # This node is on the main Y=0 interface and belongs to LowerDomain.
+                        # It should connect to the original side of CohesiveInterface (which is its current original ID).
+                        pass # No update needed
                     elif cohesive_particle_tag is not None and cohesive_particle_tag in node_line_tags:
+                        # This node is on the particle interface and belongs to LowerDomain.
+                        # It should connect to the duplicated side of CohesiveParticle.
                         updated_node_ids[i] = interface_node_duplicates['CohesiveParticle'][original_node_id]
 
-                # Case 3: Bulk element is ParticleDomain (the particles)
+                # Case 3: Bulk element is ParticleDomain
                 elif bulk_phys_tag == particle_domain_tag:
-                    # Nodes on the boundary of ParticleDomain
-                    # should connect to the *bottom/inner* side of CohesiveParticle (retain original ID)
                     if cohesive_particle_tag is not None and cohesive_particle_tag in node_line_tags:
-                        pass # Retain original ID, connects to original (bottom) side of CohesiveParticle
+                        # This node is on the particle interface and belongs to ParticleDomain.
+                        # It should connect to the original side of CohesiveParticle (which is its current original ID).
+                        pass # No update needed
 
             final_bulk_elements_connectivity.append(updated_node_ids)
             elements_final.append({
@@ -335,10 +354,7 @@ def parse_msh(msh_filepath, cohesive_line_names=["CohesiveInterface", "CohesiveP
                 'node_ids': updated_node_ids
             })
         else:
-            # For non-bulk elements (e.g., the 1D line elements themselves),
-            # just copy them as is (their node IDs should be untouched or handled by cohesive logic)
-            # NOTE: These 1D elements are only for physical group identification in Gmsh,
-            # they are not typically used as actual elements in the FEM solution beyond informing CZM creation.
+            # For non-bulk elements, just copy them as is (their node IDs should be untouched or handled by cohesive logic)
             elements_final.append(elem_data)
 
 
