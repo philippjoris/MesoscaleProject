@@ -55,11 +55,11 @@ dofs = periodicity.dofs
 # --------------------
 
 # vector definition
-vector = GooseFEM.VectorPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp, periodicity.Cdi)
+vector = GooseFEM.VectorPartitionedTyings(dofs, periodicity.Cdu, periodicity.Cdp, periodicity.Cdi)
 
 # element definition
-elem0 = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor))
-elem = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor))
+elem0 = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor, conn))
+elem = GooseFEM.Element.Quad4.QuadraturePlanar(vector.AsElement(coor, conn))
 nip = elem.nip
 
 # nodal quantities
@@ -69,8 +69,8 @@ fint = np.zeros_like(coor)  # internal force
 fext = np.zeros_like(coor)  # external force
 
 # element vectors / matrix
-ue = vector.AsElement(disp)
-coore = vector.AsElement(coor)
+ue = vector.AsElement(disp, conn)
+coore = vector.AsElement(coor, conn)
 fe = np.empty([nelem, nne, ndim])
 Ke = np.empty([nelem, nne * ndim, nne * ndim])
 
@@ -101,7 +101,7 @@ mat = GMat.LinearHardeningDamage2d(
     D3=np.ones([nelem, nip])*-1.7
     )
 # allocate system matrix
-K = GooseFEM.MatrixPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp)
+K = GooseFEM.MatrixPartitionedTyings(dofs, periodicity.Cdu, periodicity.Cdp)
 Solver = GooseFEM.MatrixPartitionedTyingsSolver()
 
 # array of unit tensor
@@ -144,14 +144,14 @@ for ilam in range(ninc):
     total_increment = initial_guess.copy()
     for iter in range(max_iter):  
         # deformation gradient
-        vector.asElement(disp, ue)
+        ue = vector.AsElement(disp, conn)
         elem0.symGradN_vector(ue, mat.F)
         mat.F += I2
         mat.refresh(tangent, element_erosion=True) 
 
         # internal force
         elem.int_gradN_dot_tensor2_dV(mat.Sig, fe)
-        vector.assembleNode(fe, fint)
+        fint = vector.AssembleNode(fe, conn)
 
         # stiffness matrix
         elem.int_gradN_dot_tensor4_dot_gradNT_dV(mat.C, Ke)
@@ -229,7 +229,7 @@ for ilam in range(ninc):
         disp += du
         total_increment += du        
         
-        elem.update_x(vector.AsElement(coor + disp))
+        elem.update_x(vector.AsElement(coor + disp, conn))
 
     # accumulate strains and stresses
     epseq[ilam] = np.average(GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1)))

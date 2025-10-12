@@ -11,9 +11,9 @@
             "cwd": "${workspaceFolder}",
             "program": "${file}",
             "console": "integratedTerminal",
-            "python": "/home/20250672/.conda/envs/simo_copy/bin/python",
+            "python": "C:\\Users\\20250672\\AppData\\Local\\anaconda3\\envs\\goose\\python.exe",
             "env": {
-                    "PYTHONPATH": "${workspaceFolder}"
+                    "PYTHONPATH": "C:\\Users\\20250672\\vscode\\Mesoscale\\MesoscaleProject"
                 }
         }
     ]
