@@ -1,5 +1,4 @@
 import numpy as np
-import collections
 import os
 import json
 
@@ -16,9 +15,9 @@ def parse_msh(msh_filepath, json_filepath):
 
     Returns:
         dict: A dictionary containing:
-            - 'coor': numpy.ndarray of shape (num_nodes, 2) storing [x, y] coordinates for each node,
+            - 'coor': numpy.ndarray of shape (num_nodes, 3) storing [x, y, z] coordinates for each node,
                       where row index (node_id - 1) corresponds to the node_id
-            - 'dofs': numpy.ndarray of shape (num_nodes, 2) storing [dof_id_x, dof_id_y] for each node
+            - 'dofs': numpy.ndarray of shape (num_nodes, 3) storing [dof_id_x, dof_id_y, dof_id_z] for each node
             - 'elements': [{id: int, type: int, phys_tag: int, node_ids: list}] (all elements, with updated node IDs)
             - 'physical_names': {tag_id: name}
             - 'conn_particle': numpy.ndarray of shape (P, 8), where P is the number of particle bulk elements
@@ -74,7 +73,7 @@ def parse_msh(msh_filepath, json_filepath):
                     elem_id = parts[0]
                     elem_type = parts[1]
                     num_tags = parts[2]
-                    phys_tag = parts[4] if num_tags >= 1 else 0
+                    phys_tag = parts[3] if num_tags >= 1 else 0
                     node_ids = parts[3 + num_tags:]
 
                     elements_raw.append({ 
@@ -130,7 +129,6 @@ def parse_msh(msh_filepath, json_filepath):
     matrix_elem_conn = []
     interface_elem_conn = []
     particle_elem_conn = []
-    elements_final = [] 
 
     # --- 1. Create Phyiscal Domains by JSON support file ---
 
@@ -138,9 +136,8 @@ def parse_msh(msh_filepath, json_filepath):
         if elem_data['type'] == 5: # This is a 8-node hex (bulk element)
             elem_id = elem_data['id']
             node_ids  = elem_data['node_ids']
-            updated_node_ids = list(node_ids) 
             phys_tag = elem_id_to_group.get(elem_id, None)
-
+            node_ids = [node_ids[i] for i in [2,6,7,3,1,5,4,0]]
             # Assign connectivity based on physical group
             if phys_tag == "matrix":
                 matrix_elem_conn.append(node_ids)
@@ -151,12 +148,6 @@ def parse_msh(msh_filepath, json_filepath):
             else:
                 pass  # or handle unassigned elements
 
-            elements_final.append({
-                'id': elem_data['id'],
-                'type': elem_data['type'],
-                'phys_tag': phys_tag,
-                'node_ids': updated_node_ids
-            })
         else:
             pass
 
