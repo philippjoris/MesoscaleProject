@@ -5,6 +5,8 @@ from matplotlib.colors import Normalize
 from matplotlib.ticker import FormatStrFormatter
 import GMatElastoPlasticFiniteStrainSimo.Cartesian3d as GMat
 import numpy as np
+import meshio
+import os
 
 # A dictionary to map keywords to plotting parameters
 PLOT_CONFIG = {
@@ -12,31 +14,36 @@ PLOT_CONFIG = {
         "data_key": "stress", 
         "label": "Equivalent stress", 
         "format": '%.1f',
-        "filename": 'results_contour_sig.pdf'
+        "filename": 'results_contour_sig.pdf',
+        "location": "element"
     },
     "strain": {
         "data_key": "strain", 
         "label": "Equivalent strain", 
         "format": '%.2f',
-        "filename": 'results_contour_eps.pdf'
+        "filename": 'results_contour_eps.pdf',
+        "location": "element"        
     },
     "damage": {
         "data_key": "damage", 
         "label": "Damage", 
         "format": '%.2f',
-        "filename": 'results_contour_damage.pdf'
+        "filename": 'results_contour_damage.pdf',
+        "location": "element"        
     },
     "triaxiality": {
         "data_key": "triaxiality", 
         "label": "Stress triaxiality", 
         "format": '%.2f',
-        "filename": 'results_contour_triaxiality.pdf'
+        "filename": 'results_contour_triaxiality.pdf',
+        "location": "element"        
     },
     "failed_elements": {
         "data_key": "failed", 
         "label": "Failed", 
         "format": '%.2f',
-        "filename": 'results_failed_elems.pdf'
+        "filename": 'results_failed_elems.pdf',
+        "location": "element"        
     }    
     # Future keywords can be added here
 }
@@ -304,3 +311,36 @@ def plot_materials(coor, conn, mat, args, labels=None):
             plt.show()
 
         plt.close(fig)
+
+def write_XDMF(plot_data, keywords, step):
+    conn_all = plot_data["conn_all"]
+    coor = plot_data["coor"]
+    disp = plot_data["disp"]
+    elements = [("hexahedron", conn_all)]
+
+    point_data = {}
+    cell_data = {}
+
+    for keyword in keywords:
+        config = PLOT_CONFIG[keyword]
+        data = plot_data[config["data_key"]]
+
+        if config["location"] == "point":
+            point_data[keyword] = data
+        elif config["location"] == "element":
+            cell_data[keyword] = [data]
+        else:
+            raise ValueError(f"Invalid location for keyword '{keyword}'")
+
+    deformed_mesh = coor + disp
+
+    mesh = meshio.Mesh(
+        points=deformed_mesh,
+        cells=elements,
+        point_data={"displacement": disp, **point_data},
+        cell_data=cell_data
+    )
+
+    os.makedirs("results", exist_ok=True)
+    filename = os.path.join("results", f"increment_{step:04d}.xdmf")
+    mesh.write(filename)

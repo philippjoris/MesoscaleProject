@@ -509,7 +509,7 @@ def element_erosion_3D_PBC_multimat(Solver, vector, conn, mat, damage_prev, elem
 
     # Phase 2: Gradually reduce the force if convergence was achieved at a non-zero multiplier
     print(f"INFO: Reintregating residual external force vector at free nodes of deleted element.")
-    num_steps_decrease = 11
+    num_steps_decrease = 4
 
     force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease + 1)[1:] 
     
