@@ -61,7 +61,8 @@ def _ensure_list(obj):
     else:
         # If it's a single object (not iterable), wrap it in a list
         return [obj]
-    
+
+
 def prepare_plot_data(elem, mat, conn, coor, disp):
     """
     Calculates element-wise average values and prepares data for 3D plotting.
@@ -91,8 +92,9 @@ def prepare_plot_data(elem, mat, conn, coor, disp):
     sig_triax_av_all = []
     failed_all = []
     conn_all = []
+    pid_all = []
 
-    for e, m, c in zip(elem_list, mat_list, conn):
+    for i, (e, m, c) in enumerate(zip(elem_list, mat_list, conn)):
         if e is None or m is None or len(c) == 0:
             continue
         dV = e.AsTensor(2, e.dV)
@@ -107,6 +109,7 @@ def prepare_plot_data(elem, mat, conn, coor, disp):
         damage_av_all.append(np.average(m.D_damage, axis=1))
         sig_triax_av_all.append(np.average(m.Sig_triax, axis=1))
         failed_all.append(np.any(m.failed, axis=1).astype(float))
+        pid_all.append(np.full(len(c), i))
 
         conn_all.append(c)
 
@@ -117,6 +120,7 @@ def prepare_plot_data(elem, mat, conn, coor, disp):
         "triaxiality": np.concatenate(sig_triax_av_all, axis=0),
         "conn_all": np.concatenate(conn_all, axis=0),
         "failed": np.concatenate(failed_all, axis=0),
+        "material_id": np.concatenate(pid_all),
         "coor": coor,
         "disp": disp,
     }
@@ -281,19 +285,21 @@ def plot_materials(coor, conn, mat, args, labels=None):
     plt.close(fig_all)
 
     # --- Plot each material individually ---
-    for i, elements in enumerate(conn):
+    for i in reversed(range(len(conn))):  
         fig = plt.figure()
         ax = fig.add_subplot(111, projection="3d")
 
-        color = cmap(i / len(conn))
-        for element in elements:
-            verts = np.array(coor[element])
-            for face in faces:
-                poly = Poly3DCollection([verts[face].tolist()],
-                                        facecolors=[color],
-                                        edgecolor="k",
-                                        linewidths=0.5)
-                ax.add_collection3d(poly)
+        for j in range(len(conn)-1, i-1, -1): 
+            color = cmap(j / len(conn))
+            elements = conn[j]
+            for element in elements:
+                verts = np.array(coor[element])
+                for face in faces:
+                    poly = Poly3DCollection([verts[face].tolist()],
+                                            facecolors=[color],
+                                            edgecolor="k",
+                                            linewidths=0.5)
+                    ax.add_collection3d(poly)
 
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
@@ -331,6 +337,9 @@ def write_XDMF(plot_data, keywords, step):
             cell_data[keyword] = [data]
         else:
             raise ValueError(f"Invalid location for keyword '{keyword}'")
+
+    if "material_id" in plot_data:
+        cell_data["material_id"] = [plot_data["material_id"]]
 
     deformed_mesh = coor + disp
 

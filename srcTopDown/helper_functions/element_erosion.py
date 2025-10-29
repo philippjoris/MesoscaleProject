@@ -233,7 +233,7 @@ def element_erosion(Solver, vector, conn, material, damage_prev, elem, fint_e, f
                 
     return disp, elem, material
 
-def element_erosion_3D_PBC(Solver, vector, conn, mat, damage_prev, elem, elem0, fint_e, fext_init, disp, newly_failed, K, fe, I2, coor):
+def element_erosion_3D_PBC_singlemat(Solver, vector, conn, mat, damage_prev, elem, elem0, fint_e, fext_base, disp, all_failed, K, fe, I2, coor):
 
     du = np.zeros_like(disp)
         
@@ -241,44 +241,56 @@ def element_erosion_3D_PBC(Solver, vector, conn, mat, damage_prev, elem, elem0, 
     new_fext_elem = np.zeros_like(fe)
 
     # Iterate over each newly failed element
-    for failed in newly_failed:
-        mat.delete_element(failed)
+    for failed_elem in all_failed:
+        mat.delete_element(int(failed_elem))
+
+    # converged_at_multiplier = 1.0
+    initial_guess = np.zeros_like(disp)
+
+    ue = np.empty(len(conn), dtype=object)
+    Ke = np.empty(len(conn), dtype=object)
+
+    # Phase 2: Gradually reduce the force if convergence was achieved at a non-zero multiplier
+    print(f"INFO: Reintregating residual external force vector at free nodes of deleted element.")
+    num_steps_decrease = 1
+    
+    forces_smoothed = False
+    while not forces_smoothed and num_steps_decrease < 16:
+        new_fext_elem.fill(0.0)
+        num_steps_decrease *= 2
+        print(f"Attempting to smooth with {num_steps_decrease -1} steps")
+        force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease-1)[1:] 
+        trial_disp = disp.copy()
+        elem.update_x(vector.AsElement(coor + trial_disp, conn))
         mat.D_damage = damage_prev
- 
-
-        # converged_at_multiplier = 1.0
-        initial_guess = np.zeros_like(disp)
-
-        # Phase 2: Gradually reduce the force if convergence was achieved at a non-zero multiplier
-        print(f"INFO: Reintregating residual external force vector at free nodes of deleted element.")
-        num_steps_decrease = 11
-
-        force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease + 1)[1:] 
-
+        ue = vector.AsElement(trial_disp, conn) 
+        elem0.symGradN_vector(ue, mat.F)
+        mat.F += I2
+        mat.refresh()
+        mat.increment()
         for incr_factor in force_multipliers_decrease:
-            new_fext_elem[failed] = -incr_factor * fint_e[failed] 
+            for failed_elem in all_failed:
+                new_fext_elem[int(failed_elem)] = -incr_factor * fint_e[int(failed_elem)] 
             
-            fext = fext_init.copy() + vector.AssembleNode(new_fext_elem, conn)
+            fext = fext_base.copy() + vector.AssembleNode(new_fext_elem, conn)
 
             forces_smoothed = False
-            
+
             mat.increment()
 
-            disp += initial_guess
-            total_increment = initial_guess.copy()
-            for iter in range(80):
-                ue = vector.AsElement(disp, conn)
-                elem0.symGradN_vector(ue, mat.F)
-                mat.F += I2
-                mat.refresh()
-
-                fe = elem.Int_gradN_dot_tensor2_dV(mat.Sig)
-                fint = vector.AssembleNode(fe, conn)
-
-                Ke = elem.Int_gradN_dot_tensor4_dot_gradNT_dV(mat.C)
+            for iter in range(12):
                 K.clear()
-                K.assemble(Ke, conn)
+                for i in range(len(mat)):
+                    ue = vector.AsElement(trial_disp, conn) 
+                    elem0.symGradN_vector(ue, mat.F)
+                    mat.F += I2
+                    mat.refresh()
+                    fe = elem.Int_gradN_dot_tensor2_dV(mat.Sig)
+                    Ke = elem.Int_gradN_dot_tensor4_dot_gradNT_dV(mat.C) 
+                    K.assemble(Ke, conn) 
                 K.finalize(stabilize=True)
+
+                fint = vector.AssembleNode(fe, conn)
 
                 fres = fext - fint
 
@@ -293,9 +305,9 @@ def element_erosion_3D_PBC(Solver, vector, conn, mat, damage_prev, elem, elem0, 
                     else:
                         res = nfres
 
-                    if res < 1e-07:
+                    if res < 1e-06:
                         forces_smoothed = True
-                        print(f"INFO: Increment {incr_factor} converged at Iter {iter}, Residual = {res}")
+                        print(f"INFO: Increment {iter} converged at Iter {iter}, Residual = {res}")
                         # disp_curr already holds the converged state, no need to copy
                         break
                 
@@ -304,14 +316,14 @@ def element_erosion_3D_PBC(Solver, vector, conn, mat, damage_prev, elem, elem0, 
                 # solve
                 Solver.solve(K, fres, du)
 
-                total_increment += du
-                disp += du
-                elem.update_x(vector.AsElement(coor + disp, conn))
-            
-            if forces_smoothed:
-                initial_guess = 0.0 * total_increment
-            if not forces_smoothed:
-                raise RuntimeError(f"Element erosion for element {failed} unsuccessful.")
+                trial_disp += du
+                for i in range(len(mat)):
+                    elem.update_x(vector.AsElement(coor + trial_disp, conn))
+    
+    if forces_smoothed:
+        disp = trial_disp
+    if not forces_smoothed:
+        raise RuntimeError(f"Element erosion for element {all_failed} unsuccessful.")
                 
     return disp, elem, mat
 
@@ -494,98 +506,6 @@ def element_erosion_3D_PBC_multimat(Solver, vector, conn, mat, damage_prev, elem
 
     # Iterate over each newly failed element
     mat[mat_failed].delete_element(failed)
-    for i in range(len(mat)):
-        mat[i].D_damage = damage_prev[i]
- 
-    # if not forces_smoothed:
-    #     #elem.update_x(vector.AsElement(coor + disp, conn))
-    converged_at_multiplier = 1.0
-
-    # converged_at_multiplier = 1.0
-    initial_guess = np.zeros_like(disp)
-
-    ue = np.empty(len(conn), dtype=object)
-    Ke = np.empty(len(conn), dtype=object)
-
-    # Phase 2: Gradually reduce the force if convergence was achieved at a non-zero multiplier
-    print(f"INFO: Reintregating residual external force vector at free nodes of deleted element.")
-    num_steps_decrease = 4
-
-    force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease + 1)[1:] 
-    
-    for incr_factor in force_multipliers_decrease:
-        new_fext_elem[failed] = -incr_factor * fint_e[mat_failed][failed] 
-        
-        fext = fext_init.copy() + vector.AssembleNode(new_fext_elem, conn[mat_failed])
-
-        forces_smoothed = False
-        
-        for material in mat:
-            material.increment()
-
-        disp += initial_guess
-        total_increment = initial_guess.copy()
-        for iter in range(20):
-            K.clear()
-            for i in range(len(mat)):
-                ue[i] = vector.AsElement(disp, conn[i]) 
-                elem0[i].symGradN_vector(ue[i], mat[i].F)
-                mat[i].F += I2[i]
-                mat[i].refresh()
-                fe[i] = elem[i].Int_gradN_dot_tensor2_dV(mat[i].Sig)
-                Ke[i] = elem[i].Int_gradN_dot_tensor4_dot_gradNT_dV(mat[i].C) 
-                K.assemble(Ke[i], conn[i]) 
-            K.finalize(stabilize=True)
-
-            fint = vector.AssembleNode(fe[0], conn[0])
-            for i in range(1,len(mat)):
-                fint += vector.AssembleNode(fe[i], conn[i])
-
-            fres = fext - fint
-
-            if iter > 0:
-                Fext = vector.AsDofs_i(fext)
-                Fint = vector.AsDofs_i(fint)
-                vector.copy_p(Fint, Fext)
-                nfres = np.sum(np.abs(Fext - Fint))
-                nfext = np.sum(np.abs(Fext))
-                if nfext:
-                    res = nfres / nfext
-                else:
-                    res = nfres
-
-                if res < 1e-06:
-                    forces_smoothed = True
-                    print(f"INFO: Increment {incr_factor} converged at Iter {iter}, Residual = {res}")
-                    # disp_curr already holds the converged state, no need to copy
-                    break
-            
-            du.fill(0.0)
-
-            # solve
-            Solver.solve(K, fres, du)
-
-            total_increment += du
-            disp += du
-            for i in range(len(mat)):
-                elem[i].update_x(vector.AsElement(coor + disp, conn[i]))
-        
-        if forces_smoothed:
-            initial_guess = 0.0 * total_increment
-        if not forces_smoothed:
-            raise RuntimeError(f"Element erosion for element {failed} unsuccessful.")
-                
-    return disp, elem, mat
-
-def trial_erosion_3D_PBC_multimat(Solver, vector, conn, mat, damage_prev, elem, elem0, fint_e, fext_base, disp, failed, K, fe, I2, coor, mat_failed):
-
-    du = np.zeros_like(disp)
-        
-    # Create new external force vector per element
-    new_fext_elem = np.zeros_like(fe[mat_failed])
-
-    # Iterate over each newly failed element
-    mat[mat_failed].delete_element(failed)
 
     # converged_at_multiplier = 1.0
     initial_guess = np.zeros_like(disp)
@@ -601,17 +521,24 @@ def trial_erosion_3D_PBC_multimat(Solver, vector, conn, mat, damage_prev, elem, 
     while not forces_smoothed and num_steps_decrease < 16:
         num_steps_decrease *= 2
         print(f"Attempting to smooth with {num_steps_decrease} steps")
-        force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease+1)[1:] 
+        force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease-1)[1:] 
         trial_disp = disp.copy()
         for i in range(len(mat)):
             elem[i].update_x(vector.AsElement(coor + trial_disp, conn[i]))
             mat[i].D_damage = damage_prev[i]
+            ue[i] = vector.AsElement(trial_disp, conn[i]) 
+            elem0[i].symGradN_vector(ue[i], mat[i].F)
+            mat[i].F += I2[i]
+            mat[i].refresh()
+            mat[i].increment()
         for incr_factor in force_multipliers_decrease:
             new_fext_elem[failed] = -incr_factor * fint_e[mat_failed][failed] 
             
             fext = fext_base.copy() + vector.AssembleNode(new_fext_elem, conn[mat_failed])
 
             forces_smoothed = False
+
+            mat[i].increment()
 
             for iter in range(12):
                 K.clear()
@@ -661,5 +588,102 @@ def trial_erosion_3D_PBC_multimat(Solver, vector, conn, mat, damage_prev, elem, 
         disp = trial_disp
     if not forces_smoothed:
         raise RuntimeError(f"Element erosion for element {failed} unsuccessful.")
+                
+    return disp, elem, mat
+
+def trial_erosion_3D_PBC_multimat(Solver, vector, conn, mat, damage_prev, elem, elem0, fint_e, fext_base, disp, all_failed, K, fe, I2, coor, mat_failed):
+
+    du = np.zeros_like(disp)
+        
+    # Create new external force vector per element
+    new_fext_elem = np.zeros_like(fe[mat_failed])
+
+    # Iterate over each newly failed element
+    for failed_elem in all_failed:
+        mat[mat_failed].delete_element(int(failed_elem))
+
+    # converged_at_multiplier = 1.0
+    initial_guess = np.zeros_like(disp)
+
+    ue = np.empty(len(conn), dtype=object)
+    Ke = np.empty(len(conn), dtype=object)
+
+    # Phase 2: Gradually reduce the force if convergence was achieved at a non-zero multiplier
+    print(f"INFO: Reintregating residual external force vector at free nodes of deleted element.")
+    num_steps_decrease = 1
+    
+    forces_smoothed = False
+    while not forces_smoothed and num_steps_decrease < 16:
+        new_fext_elem.fill(0.0)
+        num_steps_decrease *= 2
+        print(f"Attempting to smooth with {num_steps_decrease -1} steps")
+        force_multipliers_decrease = np.linspace(1.0, 0.0, num_steps_decrease-1)[1:] 
+        trial_disp = disp.copy()
+        for i in range(len(mat)):
+            elem[i].update_x(vector.AsElement(coor + trial_disp, conn[i]))
+            mat[i].D_damage = damage_prev[i]
+            ue[i] = vector.AsElement(trial_disp, conn[i]) 
+            elem0[i].symGradN_vector(ue[i], mat[i].F)
+            mat[i].F += I2[i]
+            mat[i].refresh()
+            mat[i].increment()
+        for incr_factor in force_multipliers_decrease:
+            for failed_elem in all_failed:
+                new_fext_elem[int(failed_elem)] = -incr_factor * fint_e[mat_failed][int(failed_elem)] 
+            
+            fext = fext_base.copy() + vector.AssembleNode(new_fext_elem, conn[mat_failed])
+
+            forces_smoothed = False
+
+            mat[i].increment()
+
+            for iter in range(12):
+                K.clear()
+                for i in range(len(mat)):
+                    ue[i] = vector.AsElement(trial_disp, conn[i]) 
+                    elem0[i].symGradN_vector(ue[i], mat[i].F)
+                    mat[i].F += I2[i]
+                    mat[i].refresh()
+                    fe[i] = elem[i].Int_gradN_dot_tensor2_dV(mat[i].Sig)
+                    Ke[i] = elem[i].Int_gradN_dot_tensor4_dot_gradNT_dV(mat[i].C) 
+                    K.assemble(Ke[i], conn[i]) 
+                K.finalize(stabilize=True)
+
+                fint = vector.AssembleNode(fe[0], conn[0])
+                for i in range(1,len(mat)):
+                    fint += vector.AssembleNode(fe[i], conn[i])
+
+                fres = fext - fint
+
+                if iter > 0:
+                    Fext = vector.AsDofs_i(fext)
+                    Fint = vector.AsDofs_i(fint)
+                    vector.copy_p(Fint, Fext)
+                    nfres = np.sum(np.abs(Fext - Fint))
+                    nfext = np.sum(np.abs(Fext))
+                    if nfext:
+                        res = nfres / nfext
+                    else:
+                        res = nfres
+
+                    if res < 1e-06:
+                        forces_smoothed = True
+                        print(f"INFO: Increment {iter} converged at Iter {iter}, Residual = {res}")
+                        # disp_curr already holds the converged state, no need to copy
+                        break
+                
+                du.fill(0.0)
+
+                # solve
+                Solver.solve(K, fres, du)
+
+                trial_disp += du
+                for i in range(len(mat)):
+                    elem[i].update_x(vector.AsElement(coor + trial_disp, conn[i]))
+    
+    if forces_smoothed:
+        disp = trial_disp
+    if not forces_smoothed:
+        raise RuntimeError(f"Element erosion for element {all_failed} unsuccessful.")
                 
     return disp, elem, mat

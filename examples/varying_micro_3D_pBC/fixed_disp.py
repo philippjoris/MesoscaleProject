@@ -27,8 +27,6 @@ dofs = mesh.dofs
 # create control nodes
 control = GooseFEM.Tyings.Control(coor, dofs)
 
-print(control.controlDofs)
-print(dofs[np.array([mesh.nodesBackBottomLeftCorner]), 0])
 # add control nodes
 coor = control.coor
 
@@ -36,25 +34,26 @@ coor = control.coor
 iip = np.concatenate((
     dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 0],
     dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 1],
-    dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 2],    
+    dofs[np.array([mesh.nodesFrontBottomLeftCorner]), 2],  
     control.controlDofs[0],
     control.controlDofs[1],
     control.controlDofs[2]
 ))
 
 # initialize my periodic boundary condition class
+# print(periodicity.Cdi.shape[1])
 periodicity = GooseFEM.Tyings.Periodic(coor, control.dofs, control.controlDofs, tyinglist, iip)
 dofs = periodicity.dofs
 
 # simulation variables
 # --------------------
-
 # vector definition
-vector = GooseFEM.VectorPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp, periodicity.Cdi)
+
+vector = GooseFEM.VectorPartitionedTyings(dofs, periodicity.Cdu, periodicity.Cdp, periodicity.Cdi)
 
 # element definition
-elem0 = GooseFEM.Element.Hex8.Quadrature(vector.AsElement(coor))
-elem = GooseFEM.Element.Hex8.Quadrature(vector.AsElement(coor))
+elem0 = GooseFEM.Element.Hex8.Quadrature(vector.AsElement(coor, conn))
+elem = GooseFEM.Element.Hex8.Quadrature(vector.AsElement(coor, conn))
 nip = elem.nip
 
 # nodal quantities
@@ -64,8 +63,8 @@ fint = np.zeros_like(coor)  # internal force
 fext = np.zeros_like(coor)  # external force
 
 # element vectors / matrix
-ue = vector.AsElement(disp)
-coore = vector.AsElement(coor)
+ue = vector.AsElement(disp, conn)
+coore = vector.AsElement(coor, conn)
 fe = np.empty([nelem, nne, ndim])
 Ke = np.empty([nelem, nne * ndim, nne * ndim])
 
@@ -84,11 +83,20 @@ def randomizeMicrostr(nelem, nip, fraction_soft, value_hard, value_soft):
     return array
 # -------------------
 # mat = GMat.Elastic2d(K=np.ones([nelem, nip]), G=np.ones([nelem, nip]))
+
 tauy0 = randomizeMicrostr(nelem, nip, 0.5, .600, .300)
-mat = GMat.LinearHardening2d(K=np.ones([nelem, nip])*170, G=np.ones([nelem, nip])*80, tauy0=tauy0, H=np.ones([nelem, nip])*1)
+mat = GMat.LinearHardeningDamage2d(
+    K=np.ones([nelem, nip])*170,
+    G=np.ones([nelem, nip])*80,
+    tauy0=np.ones([nelem, nip])*5.0,
+    H=np.ones([nelem, nip])*1.0,
+    D1=np.ones([nelem, nip])*0.05,
+    D2=np.ones([nelem, nip])*0.2,
+    D3=np.ones([nelem, nip])*-1.7    
+    )
 
 # allocate system matrix
-K = GooseFEM.MatrixPartitionedTyings(conn, dofs, periodicity.Cdu, periodicity.Cdp)
+K = GooseFEM.MatrixPartitionedTyings(dofs, periodicity.Cdu, periodicity.Cdp)
 Solver = GooseFEM.MatrixPartitionedTyingsSolver()
 
 # array of unit tensor
@@ -112,9 +120,9 @@ total_increment = np.zeros_like(disp)
 # deformation gradient
 F = np.array(
         [
-            [1.0 + (0.15/ninc), 0.0, 0.0],
-            [0.0, 1.0 / (1.0 + (0.15/ninc)), 0.0],
-            [0.0, 0.0, 1.0]
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [(0.04/ninc), 0.0, 1.0]
         ]
     )
 
@@ -128,19 +136,20 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
     total_increment = initial_guess.copy()
     for iter in range(max_iter):  
         # deformation gradient
-        vector.asElement(disp, ue)
+        ue = vector.AsElement(disp, conn)
         elem0.symGradN_vector(ue, mat.F)
         mat.F += I2
         mat.refresh(tangent)  
 
         # internal force
         elem.int_gradN_dot_tensor2_dV(mat.Sig, fe)
-        vector.assembleNode(fe, fint)
+        fint = vector.AssembleNode(fe, conn)
 
         # stiffness matrix
         elem.int_gradN_dot_tensor4_dot_gradNT_dV(mat.C, Ke)
-        K.assemble(Ke)
-
+        K.clear()
+        K.assemble(Ke, conn)
+        K.finalize()
         # residual
         fres = fext - fint
 
@@ -172,7 +181,9 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         if iter == 0:
             du[control.controlNodes, 0] = (F[0,:] - np.eye(3)[0, :]) 
             du[control.controlNodes, 1] = (F[1,:] - np.eye(3)[1, :])  
-            du[control.controlNodes, 2] = (F[2,:] - np.eye(3)[2, :])              
+            du[control.controlNodes, 2] = (F[2,:] - np.eye(3)[2, :])      
+            du[np.array([mesh.nodesFrontBottomRightCorner]), 1] = 0.0
+            du[np.array([mesh.nodesFrontBottomRightCorner]), 2] = 0.0       
 
         # solve
         Solver.solve(K, fres, du)
@@ -181,7 +192,7 @@ for ilam, lam in enumerate(np.linspace(0.0, 1.0, ninc)):
         disp += du
         total_increment += du
 
-        elem.update_x(vector.AsElement(coor + disp))
+        elem.update_x(vector.AsElement(coor + disp, conn))
 
     # accumulate strains and stresses
     epseq[ilam] = np.average(GMat.Epseq(np.average(GMat.Strain(mat.F), axis=1)))
